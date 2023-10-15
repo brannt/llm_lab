@@ -1,1 +1,1 @@
-Utility functions for testing and comparing LLMS.
+Utility functions for working with, testing and comparing LLMS.

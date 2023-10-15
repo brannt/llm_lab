@@ -1,0 +1,16 @@
+# The King
+langchain
+# For OpenAI
+openai
+tiktoken
+# For Chroma
+chromadb
+# For text loading
+markdown
+unstructured
+# LLM providers
+cerebrium
+gpt4all
+huggingface_hub
+modal
+replicate
