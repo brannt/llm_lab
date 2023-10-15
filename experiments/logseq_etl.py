@@ -1,7 +1,7 @@
 from enum import Enum
 from pathlib import Path
 import sys
-from typing import Any, Optional
+from typing import Any, Optional, Type, Union
 
 import dotenv
 import openai
@@ -42,19 +42,60 @@ def setup():
     openai.api_key = settings.OPENAI_API_KEY
 
 
-class DocumentETL(pydantic.BaseModel):
+def _get_fully_qualifed_name(cls: Any) -> str:
+    return f"{cls.__module__}.{cls.__name__}"
+
+
+def _load_class_from_fully_qualified_name(fqn: Union[str, type]) -> Any:
+    if isinstance(fqn, type):
+        return fqn
+    module_name, class_name = fqn.rsplit(".", 1)
+    module = __import__(module_name, fromlist=[class_name])
+    return getattr(module, class_name)
+
+
+class DocumentETLParams(pydantic.BaseModel):
+    loader_cls: Type[BaseLoader]
+    loader_params: dict[str, Any]
+    transformer_cls: Type[BaseDocumentTransformer]
+    transformer_params: dict[str, Any]
+    vector_store_cls: Type[VectorStore]
+    vector_store_params: dict[str, Any]
+
+    _load_loader_cls = pydantic.validator("loader_cls", pre=True, allow_reuse=True)(
+        _load_class_from_fully_qualified_name
+    )
+    _load_transformer_cls = pydantic.validator(
+        "transformer_cls", pre=True, allow_reuse=True
+    )(_load_class_from_fully_qualified_name)
+    _load_vector_store_cls = pydantic.validator(
+        "vector_store_cls", pre=True, allow_reuse=True
+    )(_load_class_from_fully_qualified_name)
+
+    class Config:
+        json_encoders = {
+            type: _get_fully_qualifed_name,
+        }
+
+
+class DocumentETL:
     loader: BaseLoader
     transformer: BaseDocumentTransformer
     vector_store: VectorStore
-
-    class Config:
-        arbitrary_types_allowed = True
 
     def __call__(self, *args: Any, **kwds: Any) -> Any:
         docs = self.loader.load()
         transformed = self.transformer.transform_documents(docs)
         self.vector_store.add_documents(transformed)
         self.vector_store.persist()
+
+    @classmethod
+    def from_params(cls, params: DocumentETLParams) -> "DocumentETL":
+        return cls(
+            loader=params.loader_cls(**params.loader_params),
+            transformer=params.transformer_cls(**params.transformer_params),
+            vector_store=params.vector_store_cls(**params.vector_store_params),
+        )
 
 
 def run_etl(etl: Optional[DocumentETL] = None) -> None:
@@ -64,7 +105,31 @@ def run_etl(etl: Optional[DocumentETL] = None) -> None:
     etl()
 
 
-def setup_etl():
+def get_etl_params() -> DocumentETLParams:
+    logseq_location = settings.LOGSEQ_DIR
+    return DocumentETLParams(
+        loader_cls=DirectoryLoader,
+        loader_params={
+            "path": logseq_location,
+            "glob": "**/*.md",
+            "loader_cls": UnstructuredMarkdownLoader,
+            "silent_errors": True,
+        },
+        transformer_cls=RecursiveCharacterTextSplitter,
+        transformer_params={
+            "chunk_size": 1000,
+            "chunk_overlap": 100,
+            "separators": ["\n\n", "\n- ", "\n", "\.", " ", ""],
+        },
+        vector_store_cls=Chroma,
+        vector_store_params={
+            "embedding_function": OpenAIEmbeddings(),
+            "persist_directory": str(settings.CHROMA_PERSIST_DIR),
+        },
+    )
+
+
+def setup_etl() -> DocumentETL:
     logseq_location = settings.LOGSEQ_DIR
 
     loader = DirectoryLoader(
@@ -93,12 +158,12 @@ def setup_etl():
     return etl
 
 
-def run_query(query: str, qa_chain: Optional[RetrievalQA] = None) -> None:
+def run_query(query: str, qa_chain: Optional[RetrievalQA] = None) -> str:
     qa_chain = qa_chain or setup_query_chain()
     return qa_chain({"query": query})["result"]
 
 
-def setup_query_chain():
+def setup_query_chain() -> RetrievalQA:
     vectordb = Chroma(
         embedding_function=OpenAIEmbeddings(),
         persist_directory=str(settings.CHROMA_PERSIST_DIR),
